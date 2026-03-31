@@ -1,0 +1,258 @@
+# FILE: src/chat/chat_session.py
+# CHANGES: Added document lookup, /documents, and /debug while preserving the existing terminal chat workflow.
+
+import asyncio
+import os
+import re
+from typing import Optional
+
+from src.graph.chunk_repository import ChunkRepository
+from src.graph.memory_repository import MemoryRepository
+from src.graph.neo4j_client import Neo4jClient
+from src.ingestion.pipeline import IngestionPipeline
+from src.llm.context_assembler import ContextAssembler
+from src.llm.intent_classifier import IntentClassifier
+from src.llm.llm_client import LLMClient
+from src.memory.memory_service import MemoryService
+from src.retrieval.retrieval_service import RetrievalService
+
+
+class ChatSession:
+    """Terminal session logic for chat, memory, and ingestion commands."""
+
+    def __init__(
+        self,
+        neo4j_client: Neo4jClient,
+        pipeline: IngestionPipeline,
+        retrieval: RetrievalService,
+        memory_service: MemoryService,
+        memory_repo: MemoryRepository,
+        classifier: IntentClassifier,
+        assembler: ContextAssembler,
+        llm: LLMClient,
+        user_id: str,
+        chunk_repo: Optional[ChunkRepository] = None,
+    ) -> None:
+        """Store chat dependencies for a single interactive session."""
+        self.neo4j_client = neo4j_client
+        self.pipeline = pipeline
+        self.retrieval = retrieval
+        self.memory_service = memory_service
+        self.memory_repo = memory_repo
+        self.classifier = classifier
+        self.assembler = assembler
+        self.llm = llm
+        self.user_id = user_id
+        self.chunk_repo = chunk_repo
+        self.simple_system = "You are a concise, helpful terminal chat assistant."
+
+    async def _read_input(self) -> str:
+        """Read user input without blocking the event loop."""
+        return await asyncio.to_thread(input, "You: ")
+
+    async def _handle_ingest(self, path: str) -> None:
+        """Handle the /ingest command for files or directories."""
+        resolved = os.path.abspath(path)
+        if not os.path.exists(resolved):
+            print(f"[Path not found: {resolved}]")
+            return
+        if os.path.isdir(resolved):
+            await self.pipeline.ingest_directory(resolved)
+            return
+        await self.pipeline.ingest_file(resolved)
+
+    async def _handle_memories(self) -> None:
+        """Display stored memories for the active user."""
+        memories = await self.memory_repo.list_recent(self.user_id, limit=50)
+        if not memories:
+            print("[No stored memories]\n")
+            return
+        print("Stored memories:")
+        for index, memory in enumerate(memories, start=1):
+            print(f"  {index}. {memory.content}")
+        print()
+
+    async def _handle_forget(self, text: str) -> None:
+        """Delete the first stored memory matching the provided text."""
+        if not text:
+            print("[Usage: /forget <text>]\n")
+            return
+        matches = await self.memory_repo.find_by_text(self.user_id, text, limit=10)
+        if not matches:
+            print("[No matching memory found]\n")
+            return
+        await self.memory_repo.delete(matches[0].memory_id)
+        print(f"[Forgot memory: {matches[0].content}]\n")
+
+    async def _handle_stats(self) -> None:
+        """Display current graph statistics."""
+        query = """
+        CALL {
+            MATCH (c:Chunk) RETURN count(c) AS chunk_count
+        }
+        CALL {
+            MATCH (e:Entity) RETURN count(e) AS entity_count
+        }
+        CALL {
+            MATCH (t:Topic) RETURN count(t) AS topic_count
+        }
+        CALL {
+            MATCH (m:Memory) RETURN count(m) AS memory_count
+        }
+        RETURN chunk_count, entity_count, topic_count, memory_count
+        """
+        rows = await self.neo4j_client.run_query(query)
+        stats = rows[0] if rows else {}
+        print(
+            f"[Chunks: {stats.get('chunk_count', 0)} | "
+            f"Entities: {stats.get('entity_count', 0)} | "
+            f"Topics: {stats.get('topic_count', 0)} | "
+            f"Memories: {stats.get('memory_count', 0)}]\n"
+        )
+
+    async def _handle_documents(self) -> None:
+        """Display the ingested document catalog."""
+        if self.chunk_repo is None:
+            print("Document listing is unavailable.\n")
+            return
+        docs = await self.chunk_repo.list_all_documents()
+        if docs:
+            print(f"\n{'=' * 50}")
+            print(f"INGESTED DOCUMENTS ({len(docs)} total)")
+            print(f"{'=' * 50}")
+            for document in docs:
+                title = document.get("title") or document["filename"]
+                print(f"  {title}")
+                print(f"    File: {document['filename']}")
+                print(f"    Chunks: {document['chunk_count']} | Pages: {document['page_count']}")
+            print(f"{'=' * 50}\n")
+        else:
+            print("No documents ingested yet. Use /ingest <path>.\n")
+
+    async def _handle_debug(self, debug_query: str) -> None:
+        """Run retrieval diagnostics for a query."""
+        if not debug_query:
+            print("[Usage: /debug <query>]\n")
+            return
+        print(f"\n[DEBUG] Running retrieval for: '{debug_query}'")
+        embedding = self.retrieval.embedder.embed_text(debug_query)
+        print(f"[DEBUG] Embedding dim: {len(embedding)}")
+
+        v_hits = await self.retrieval.vector_search.search_chunks(embedding, top_k=5)
+        print(f"[DEBUG] Vector hits: {len(v_hits)}")
+        for hit in v_hits[:3]:
+            print(f"  score={hit.score:.3f} | {hit.source_file} | {hit.content[:60]}...")
+
+        b_hits = await self.retrieval.bm25_search.search_chunks(debug_query, top_k=5)
+        print(f"[DEBUG] BM25 hits: {len(b_hits)}")
+        for hit in b_hits[:3]:
+            print(f"  score={hit.score:.3f} | {hit.source_file} | {hit.content[:60]}...")
+        print()
+
+    async def _handle_command(self, user_input: str) -> Optional[bool]:
+        """Handle slash commands and indicate whether the loop should continue."""
+        if user_input.startswith("/ingest "):
+            await self._handle_ingest(user_input[len("/ingest ") :].strip())
+            return True
+        if user_input == "/memories":
+            await self._handle_memories()
+            return True
+        if user_input.startswith("/forget "):
+            await self._handle_forget(user_input[len("/forget ") :].strip())
+            return True
+        if user_input == "/stats":
+            await self._handle_stats()
+            return True
+        if user_input.lower() == "/documents":
+            await self._handle_documents()
+            return True
+        if user_input.lower().startswith("/debug "):
+            await self._handle_debug(user_input[7:].strip())
+            return True
+        if user_input == "/quit":
+            return False
+        if user_input.startswith("/"):
+            print("[Unknown command]\n")
+            return True
+        return None
+
+    async def run(self) -> None:
+        """Run the interactive chat loop until the user exits."""
+        print("Commands:")
+        print("  /ingest <path>    ingest a file or directory")
+        print("  /memories         show stored memories")
+        print("  /forget <text>    delete a memory containing this text")
+        print("  /stats            show graph statistics")
+        print("  /documents        list ingested documents")
+        print("  /debug <query>    inspect vector and BM25 retrieval")
+        print("  /quit             exit\n")
+        while True:
+            user_input = (await self._read_input()).strip()
+            if not user_input:
+                continue
+            if user_input.startswith("/"):
+                should_continue = await self._handle_command(user_input)
+                if should_continue is False:
+                    break
+                if should_continue:
+                    continue
+
+            intent = await self.classifier.classify(user_input)
+            print(f"  [{intent}]")
+
+            if intent == "memory_share":
+                await self.memory_service.process_and_store(user_input, self.user_id)
+                response = await self.llm.complete(
+                    "You are a concise assistant acknowledging that a memory was stored.",
+                    "Acknowledge the memory briefly in one sentence.",
+                    max_tokens=40,
+                    temperature=0.2,
+                )
+            elif intent == "self_query":
+                hits = await self.retrieval.retrieve_memory(user_input, self.user_id)
+                packet = self.assembler.build_memory_context(user_input, hits)
+                if hits:
+                    await self.memory_repo.touch_many([hit.id for hit in hits])
+                response = await self.llm.complete(
+                    packet.system_prompt,
+                    packet.user_prompt,
+                    max_tokens=120,
+                    temperature=0.0,
+                )
+            elif intent == "document_lookup":
+                filename_pattern = re.compile(r"[\w\-\.]+\.(pdf|txt|PDF|TXT)", re.IGNORECASE)
+                arxiv_pattern = re.compile(r"\d{4}\.\d{4,5}(v\d+)?", re.IGNORECASE)
+
+                filename_match = filename_pattern.search(user_input)
+                arxiv_match = arxiv_pattern.search(user_input)
+
+                hits = []
+                if filename_match:
+                    hits = await self.retrieval.retrieve_by_filename(filename_match.group(0))
+                elif arxiv_match:
+                    hits = await self.retrieval.retrieve_by_filename(arxiv_match.group(0))
+
+                if not hits and self.chunk_repo is not None:
+                    docs = await self.chunk_repo.list_all_documents()
+                    if docs:
+                        doc_list = "\n".join(
+                            [
+                                f"  - {document['filename']} "
+                                f"({document['chunk_count']} chunks, {document['page_count']} pages)"
+                                for document in docs[:20]
+                            ]
+                        )
+                        response = f"I have {len(docs)} documents ingested:\n{doc_list}"
+                    else:
+                        response = "No documents found. Use /ingest <path> to add documents."
+                else:
+                    packet = self.assembler.build_knowledge_context(user_input, hits)
+                    response = await self.llm.complete(packet.system_prompt, packet.user_prompt)
+            elif intent == "knowledge_query":
+                hits = await self.retrieval.retrieve_with_query_expansion(user_input)
+                packet = self.assembler.build_knowledge_context(user_input, hits)
+                response = await self.llm.complete(packet.system_prompt, packet.user_prompt)
+            else:
+                response = await self.llm.complete(self.simple_system, user_input, max_tokens=120, temperature=0.5)
+
+            print(f"AI: {response}\n")
