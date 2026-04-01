@@ -1,5 +1,5 @@
 # FILE: src/retrieval/vector_search.py
-# CHANGES: Hardened vector chunk search with validation and diagnostics for bulk-ingest retrieval failures.
+# CHANGES: Added user-scoped vector retrieval while preserving diagnostics and shared-pool visibility.
 
 from typing import List
 
@@ -16,7 +16,7 @@ class VectorSearch:
         """Initialize the vector search service."""
         self.client = client
 
-    async def search_chunks(self, embedding: List[float], top_k: int = 10) -> List[RetrievalHit]:
+    async def search_chunks(self, embedding: List[float], top_k: int = 10, user_id: str = "default") -> List[RetrievalHit]:
         """Search chunk_vector index for semantically similar chunks."""
         if not embedding:
             logger.error("Vector search called with empty embedding")
@@ -34,13 +34,15 @@ class VectorSearch:
                 "CALL db.index.vector.queryNodes("
                 "  'chunk_vector', $top_k, $embedding"
                 ") YIELD node, score "
+                "WHERE node.user_id = $user_id "
+                "   OR node.user_id IS NULL "
                 "RETURN node.chunk_id AS chunk_id, "
                 "       node.content AS content, "
                 "       node.source_file AS source_file, "
                 "       node.page_number AS page_number, "
                 "       score "
                 "ORDER BY score DESC",
-                {"top_k": top_k, "embedding": embedding},
+                {"top_k": top_k, "embedding": embedding, "user_id": user_id},
             )
 
             logger.debug("Vector search: {} hits returned", len(results))

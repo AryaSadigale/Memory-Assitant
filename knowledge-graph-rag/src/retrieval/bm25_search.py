@@ -1,6 +1,7 @@
 # FILE: src/retrieval/bm25_search.py
-# CHANGES: Relaxed Lucene escaping and added diagnostics so BM25 failures no longer go silent.
+# CHANGES: Added user-scoped BM25 retrieval while preserving diagnostics and shared-pool visibility.
 
+import re
 from typing import List
 
 from loguru import logger
@@ -33,7 +34,7 @@ class BM25Search:
             return "*"
         return escaped
 
-    async def search_chunks(self, query: str, top_k: int = 10) -> List[RetrievalHit]:
+    async def search_chunks(self, query: str, top_k: int = 10, user_id: str = "default") -> List[RetrievalHit]:
         """Fulltext BM25 search over chunk content."""
         if not query or not query.strip():
             logger.warning("BM25 search called with empty query")
@@ -47,13 +48,15 @@ class BM25Search:
                 "CALL db.index.fulltext.queryNodes("
                 "  'chunk_fulltext', $query"
                 ") YIELD node, score "
+                "WHERE node.user_id = $user_id "
+                "   OR node.user_id IS NULL "
                 "RETURN node.chunk_id AS chunk_id, "
                 "       node.content AS content, "
                 "       node.source_file AS source_file, "
                 "       node.page_number AS page_number, "
                 "       score "
                 "LIMIT $top_k",
-                {"query": escaped, "top_k": top_k},
+                {"query": escaped, "top_k": top_k, "user_id": user_id},
             )
 
             logger.debug("BM25 search: {} hits returned", len(results))
@@ -86,32 +89,63 @@ class BM25Search:
         escaped = self._escape_query(query)
         logger.debug("Memory BM25 search query: '{}'", escaped)
 
-        try:
-            rows = await self.client.run_query(
-                """
-                CALL db.index.fulltext.queryNodes('memory_fulltext', $query)
-                YIELD node, score
-                WHERE node.user_id = $user_id
-                RETURN node.memory_id AS id,
-                       node.content AS content,
-                       score AS score
-                LIMIT $top_k
-                """,
-                {"query": escaped, "user_id": user_id, "top_k": top_k},
-            )
-            logger.debug("Memory BM25 search: {} hits returned", len(rows))
-            if not rows:
-                logger.warning("Memory BM25 search returned zero results for user {}", user_id)
-            return [
-                RetrievalHit(
-                    id=row["id"],
-                    content=row["content"],
-                    score=float(row["score"]),
-                    source_type="memory",
-                    bm25_score=float(row["score"]),
-                )
-                for row in rows
-            ]
-        except Exception as exc:
-            logger.error("Memory BM25 search failed: {}", exc)
+        stopwords = {
+            "the", "and", "for", "with", "that", "this", "from",
+            "tell", "about", "what", "know", "myself", "your", "you",
+            "are", "how", "who", "why", "when", "where", "give", "show",
+            "can", "did", "have", "been", "into", "more", "also",
+        }
+        words = [
+            word
+            for word in re.findall(r"\b[a-zA-Z]{3,}\b", query.lower())
+            if word not in stopwords
+        ]
+
+        if not words:
+            logger.debug("Memory BM25: no meaningful words, skipping fulltext")
             return []
+
+        queries_to_try = [escaped]
+        keyword_query = " OR ".join(words)
+        if keyword_query != escaped:
+            queries_to_try.append(keyword_query)
+
+        for attempt_query in queries_to_try:
+            try:
+                rows = await self.client.run_query(
+                    "CALL db.index.fulltext.queryNodes("
+                    "  'memory_fulltext', $query"
+                    ") YIELD node, score "
+                    "WHERE node.user_id = $user_id "
+                    "RETURN node.memory_id AS id, "
+                    "       node.content AS content, "
+                    "       score AS score "
+                    "LIMIT $top_k",
+                    {
+                        "query": attempt_query,
+                        "user_id": user_id,
+                        "top_k": top_k,
+                    },
+                )
+                logger.debug(
+                    "Memory BM25 search: {} hits returned (query: '{}')",
+                    len(rows),
+                    attempt_query[:50],
+                )
+                if rows:
+                    return [
+                        RetrievalHit(
+                            id=row["id"],
+                            content=row["content"],
+                            score=float(row["score"]),
+                            source_type="memory",
+                            bm25_score=float(row["score"]),
+                        )
+                        for row in rows
+                    ]
+            except Exception as exc:
+                logger.error("Memory BM25 search failed: {}", exc)
+                return []
+
+        logger.debug("Memory BM25: all query attempts returned zero results")
+        return []

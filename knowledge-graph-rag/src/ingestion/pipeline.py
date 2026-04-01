@@ -1,5 +1,5 @@
 # FILE: src/ingestion/pipeline.py
-# CHANGES: Added vector-index readiness warmup and document node creation while keeping the existing ingestion flow intact.
+# CHANGES: Added user_id stamping to chunks and documents while preserving the existing ingestion workflow and index warmup.
 
 import os
 import re
@@ -108,16 +108,19 @@ class IngestionPipeline:
             for name, _ in frequencies.most_common(limit)
         ]
 
-    async def ingest_file(self, file_path: str) -> IngestionResult:
+    async def ingest_file(self, file_path: str, user_id: str = "default") -> IngestionResult:
         """Parse, chunk, embed, and persist a single document into Neo4j."""
         filename = os.path.basename(file_path)
+        logger.debug("Ingesting {} for user {}", filename, user_id)
         logger.info("Parsing {}...", filename)
         pages = self.parser.parse_file(file_path)
         chunks = self.splitter.split(pages)
+        for chunk in chunks:
+            chunk["user_id"] = user_id
         logger.info("Split into {} chunks", len(chunks))
         if not chunks:
             return IngestionResult(source_file=filename, chunk_count=0, entity_count=0, relationship_count=0)
-        if await self.chunk_repo.exists_by_source(filename):
+        if await self.chunk_repo.exists_by_source(filename, user_id=user_id):
             try:
                 import fitz
                 import uuid as _uuid
@@ -140,6 +143,7 @@ class IngestionPipeline:
                     abstract=abstract,
                     page_count=page_count,
                     chunk_count=len(chunks),
+                    user_id=user_id,
                 )
                 await self.chunk_repo.create_document_node(doc_node)
                 logger.info("Created Document node for {}", filename)
@@ -166,6 +170,7 @@ class IngestionPipeline:
             embeddings = self.embedder.embed_batch(texts)
             for chunk, embedding in zip(batch, embeddings):
                 chunk["embedding"] = embedding
+                chunk["user_id"] = user_id
                 embedded_chunks.append(chunk)
             if len(embedded_chunks) % 5000 == 0:
                 logger.info("Progress: {}/{} chunks", len(embedded_chunks), len(chunks))
@@ -236,6 +241,7 @@ class IngestionPipeline:
                 abstract=abstract,
                 page_count=page_count,
                 chunk_count=len(chunks),
+                user_id=user_id,
             )
             await self.chunk_repo.create_document_node(doc_node)
             logger.info("Created Document node for {}", filename)
@@ -252,7 +258,7 @@ class IngestionPipeline:
             relationship_count=relationship_count,
         )
 
-    async def ingest_directory(self, dir_path: str) -> None:
+    async def ingest_directory(self, dir_path: str, user_id: str = "default") -> None:
         """Recursively ingest all supported files from a directory one by one."""
         candidates: List[str] = []
         for root, _, files in os.walk(dir_path):
@@ -265,7 +271,7 @@ class IngestionPipeline:
         total_relationships = 0
         skipped_files = 0
         for path in candidates:
-            result = await self.ingest_file(path)
+            result = await self.ingest_file(path, user_id=user_id)
             total_chunks += result.chunk_count
             total_entities += result.entity_count
             total_relationships += result.relationship_count

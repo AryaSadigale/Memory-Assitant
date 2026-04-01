@@ -1,7 +1,10 @@
 # FILE: src/llm/context_assembler.py
 # PURPOSE: Assemble retrieval hits into bounded prompts for the answering model.
 
+from collections import OrderedDict
 from typing import List
+
+from loguru import logger
 
 from src.graph_models import ContextPacket, RetrievalHit
 
@@ -9,12 +12,32 @@ from src.graph_models import ContextPacket, RetrievalHit
 class ContextAssembler:
     """Build structured LLM prompts from retrieval hits."""
 
-    KNOWLEDGE_SYSTEM = """You are a precise knowledge assistant.
-Answer questions using ONLY the provided source passages.
-Cite sources as [SOURCE 1], [SOURCE 2] etc.
-If the passages don't contain the answer, say exactly:
-"I don't have information on this in my knowledge base."
-Never answer from general knowledge."""
+    KNOWLEDGE_SYSTEM = """You are an expert assistant answering STRICTLY from provided context.
+
+RULES:
+
+* Use ONLY the given context
+* NEVER say 'no information' if context exists
+* Extract FULL explanation, not summary
+* Minimum answer length: 8–12 lines
+* If definition exists -> explain it fully
+* Combine multiple context sections if needed
+
+If context contains:
+'Nontowered Airport'
+
+You MUST explain:
+
+* definition
+* characteristics
+* communication method
+* pilot behavior
+
+DO NOT say:
+'not enough information'
+Instead extract what is present.
+
+Cite sources as [SOURCE 1], [SOURCE 2] etc."""
 
     MEMORY_SYSTEM = """You are a personal memory assistant.
 Answer questions about the user using ONLY their stored memories.
@@ -41,22 +64,40 @@ Never guess or infer."""
 
     def build_knowledge_context(self, query: str, hits: List[RetrievalHit]) -> ContextPacket:
         """Build a knowledge-answering prompt packet from chunk hits."""
-        trimmed_hits = self._trim_hits(hits, max_words=1100)
+        trimmed_hits = self._trim_hits(hits, max_words=1800)
+        grouped: "OrderedDict[tuple[str, int], List[RetrievalHit]]" = OrderedDict()
+        seen_ids = set()
+        for hit in trimmed_hits:
+            if hit.id in seen_ids:
+                continue
+            seen_ids.add(hit.id)
+            key = (hit.source_file or "unknown", int(hit.page_number or 0))
+            grouped.setdefault(key, []).append(hit)
+
         formatted_sources = []
-        for index, hit in enumerate(trimmed_hits, start=1):
-            if hit.page_number:
-                location = f"(from: {hit.source_file}, page {hit.page_number})"
-            else:
-                location = f"(from: {hit.source_file})"
-            formatted_sources.append(f"[SOURCE {index}] {location}\n{hit.content}")
+        ordered_hits: List[RetrievalHit] = []
+        for index, ((source_file, page_number), group_hits) in enumerate(grouped.items(), start=1):
+            merged_content = "\n\n".join(
+                dict.fromkeys(hit.content.strip() for hit in group_hits if hit.content.strip())
+            )
+            ordered_hits.extend(group_hits)
+            formatted_sources.append(
+                f"[SOURCE {index}]\n[DOCUMENT: {source_file} | PAGE {page_number}]\n\n{merged_content}"
+            )
         sources = "\n\n".join(formatted_sources)
+        logger.debug("FINAL CONTEXT:\n{}", sources)
         return ContextPacket(
             query=query,
-            chunk_hits=trimmed_hits,
+            chunk_hits=ordered_hits,
             memory_hits=[],
             system_prompt=self.KNOWLEDGE_SYSTEM,
-            user_prompt=f"Sources:\n{sources}\n\nQuestion: {query}",
-            has_chunks=bool(trimmed_hits),
+            user_prompt=(
+                f"Context:\n{sources}\n\n"
+                f"Question: {query}\n\n"
+                "Write a detailed answer using the context above. "
+                "Explain the topic fully and combine relevant sections when needed."
+            ),
+            has_chunks=bool(ordered_hits),
             has_memories=False,
         )
 

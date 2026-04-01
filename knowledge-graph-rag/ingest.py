@@ -1,9 +1,9 @@
 # FILE: ingest.py
-# PURPOSE: Run standalone document ingestion without starting the interactive chat loop.
+# CHANGES: Added profile-aware ingestion so files are stamped into the correct private user namespace.
 
+import argparse
 import asyncio
 import os
-import sys
 
 from src.config import Settings
 from src.graph.chunk_repository import ChunkRepository
@@ -15,13 +15,20 @@ from src.ingestion.document_parser import DocumentParser
 from src.ingestion.embedder import Embedder
 from src.ingestion.entity_extractor import EntityExtractor
 from src.ingestion.pipeline import IngestionPipeline
+from src.memory.profile_manager import ProfileManager
 
 
 async def main() -> None:
     """Initialize dependencies and ingest a file or directory from the CLI."""
-    if len(sys.argv) < 2:
-        raise SystemExit("Usage: python ingest.py /app/data/myfile.pdf or python ingest.py /app/data/")
-    path = sys.argv[1]
+    parser = argparse.ArgumentParser()
+    parser.add_argument("path", help="File or directory to ingest")
+    parser.add_argument(
+        "--user",
+        help="Username to ingest as (default: current session user)",
+        default=None,
+    )
+    args = parser.parse_args()
+
     settings = Settings()
     neo4j_client = Neo4jClient(settings.neo4j_uri, settings.neo4j_user, settings.neo4j_password)
     await neo4j_client.connect()
@@ -40,12 +47,30 @@ async def main() -> None:
             parser=DocumentParser(),
             settings=settings,
         )
-        if os.path.isdir(path):
-            await pipeline.ingest_directory(path)
-        elif os.path.isfile(path):
-            await pipeline.ingest_file(path)
+
+        profile_manager = ProfileManager(neo4j_client)
+
+        if args.user:
+            result = await neo4j_client.run_query(
+                "MATCH (p:Profile {username: $username}) "
+                "RETURN p.user_id AS user_id",
+                {"username": args.user.lower()},
+            )
+            if not result:
+                print(f"User '{args.user}' not found. Run main.py first to create a profile.")
+                return
+            user_id = result[0]["user_id"]
+            print(f"Ingesting as user: {args.user}")
         else:
-            raise SystemExit(f"Path not found: {path}")
+            profile = await profile_manager.get_or_create_profile()
+            user_id = profile.user_id
+
+        if os.path.isdir(args.path):
+            await pipeline.ingest_directory(args.path, user_id=user_id)
+        elif os.path.isfile(args.path):
+            await pipeline.ingest_file(args.path, user_id=user_id)
+        else:
+            raise SystemExit(f"Path not found: {args.path}")
         print(f"Total chunks: {await chunk_repo.count()}")
     finally:
         await neo4j_client.close()

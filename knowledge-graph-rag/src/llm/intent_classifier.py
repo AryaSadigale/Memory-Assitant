@@ -1,5 +1,5 @@
 # FILE: src/llm/intent_classifier.py
-# CHANGES: Added document_lookup intent and updated routing instructions for document-centric queries.
+# CHANGES: Tightened classifier guidance so topic queries stay in knowledge_query and only explicit file references use document_lookup.
 
 from src.llm.llm_client import LLMClient
 
@@ -15,19 +15,43 @@ VALID_INTENTS = {
 class IntentClassifier:
     """LLM-backed intent classifier for routing chat requests."""
 
-    SYSTEM_PROMPT = """Classify the user message into exactly one intent:
-- knowledge_query: user wants factual information about a topic, concept, or field
-- memory_share: user is sharing personal facts about themselves
-- self_query: user is asking about themselves or what you know about them
-- document_lookup: user is asking about a specific paper, file, or document by name or ID, or asking to list what documents are available
-- chitchat: casual talk, short replies, corrections, one-word answers
+    SYSTEM_PROMPT = """Classify the user message into exactly one intent.
+
+- knowledge_query: user wants factual information about a topic, concept,
+  technology, process, or field. This includes "tell me about X" where X
+  is a topic, not a specific file.
+
+- document_lookup: user is referencing a SPECIFIC document by filename,
+  arxiv ID, or asking to list available documents. Only use this when
+  the message contains a filename (ends in .pdf, .txt), an arxiv-style ID
+  like 2403.04782, or explicit phrases like "what papers do you have",
+  "list documents", "list files", "what files", "show documents".
+
+- memory_share: user is sharing personal facts about themselves.
+
+- self_query: user is asking what you know about them personally.
+
+- chitchat: casual talk, greetings, short replies, corrections.
+
+CRITICAL RULE: "Tell me about [topic]" is knowledge_query unless the
+topic is a specific filename or document ID. Topics like "airports",
+"machine learning", "chapter 10", "towered airport", "fintech" are
+knowledge_query, NOT document_lookup.
+
+Examples of knowledge_query:
+  "Tell me about towered airports"
+  "Explain aeronautical charts"
+  "What is federated learning"
+  "Tell me about chapter 10"
+  "What does the book say about payments"
 
 Examples of document_lookup:
-  "tell me about 2403.04782v1.pdf"
-  "what is in the scalable_ai paper"
-  "what papers do you have"
-  "list your documents"
-  "show me the osdi paper"
+  "Tell me about 2403.04782v1.pdf"
+  "What is in 3445.pdf"
+  "Tell me about the osdi paper"
+  "What papers do you have"
+  "List my documents"
+  "Tell me about chapter 10 from 3445.pdf"
 
 Reply with ONLY the intent label. No explanation. No punctuation."""
 

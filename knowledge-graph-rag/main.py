@@ -1,5 +1,5 @@
 # FILE: main.py
-# CHANGES: Wired retrieval with document metadata support and exposed repositories to the terminal chat session.
+# CHANGES: Added memory fulltext health-check and rebuild flow after profile selection.
 
 import asyncio
 
@@ -11,7 +11,13 @@ from src.graph.chunk_repository import ChunkRepository
 from src.graph.entity_repository import EntityRepository
 from src.graph.memory_repository import MemoryRepository
 from src.graph.neo4j_client import Neo4jClient
-from src.graph.schema import initialize_schema
+from src.graph.profile_repository import ProfileRepository
+from src.graph.schema import (
+    check_memory_index_health,
+    initialize_schema,
+    rebuild_memory_fulltext_index,
+    verify_indexes,
+)
 from src.ingestion.chunk_splitter import ChunkSplitter
 from src.ingestion.document_parser import DocumentParser
 from src.ingestion.embedder import Embedder
@@ -22,7 +28,7 @@ from src.llm.fact_extractor import FactExtractor
 from src.llm.intent_classifier import IntentClassifier
 from src.llm.llm_client import LLMClient
 from src.memory.memory_service import MemoryService
-from src.memory.session_manager import SessionManager
+from src.memory.profile_manager import ProfileManager
 from src.retrieval.bm25_search import BM25Search
 from src.retrieval.graph_traversal import GraphTraversal
 from src.retrieval.hybrid_ranker import HybridRanker
@@ -45,11 +51,13 @@ async def main() -> None:
     await neo4j_client.connect()
     try:
         await initialize_schema(neo4j_client)
+        await verify_indexes(neo4j_client)
 
         embedder = Embedder(settings.embedding_model, settings.embedding_device)
         chunk_repo = ChunkRepository(neo4j_client)
         entity_repo = EntityRepository(neo4j_client)
         memory_repo = MemoryRepository(neo4j_client)
+        profile_repo = ProfileRepository(neo4j_client)
 
         parser = DocumentParser()
         splitter = ChunkSplitter(settings.chunk_size, settings.chunk_overlap)
@@ -87,8 +95,15 @@ async def main() -> None:
         assembler = ContextAssembler()
         memory_service = MemoryService(memory_repo, embedder, fact_extractor)
 
-        session_manager = SessionManager(settings.session_file)
-        user_id = session_manager.get_or_create_user_id()
+        profile_manager = ProfileManager(neo4j_client)
+        profile = await profile_manager.get_or_create_profile()
+        user_id = profile.user_id
+        memory_index_ok = await check_memory_index_health(
+            neo4j_client, user_id
+        )
+        if not memory_index_ok:
+            await rebuild_memory_fulltext_index(neo4j_client)
+        username = profile.username
 
         memories = await memory_service.load_for_session(user_id, limit=30)
         if memories:
@@ -105,6 +120,9 @@ async def main() -> None:
             llm=llm,
             user_id=user_id,
             chunk_repo=chunk_repo,
+            username=username,
+            profile_repo=profile_repo,
+            profile_manager=profile_manager,
         )
         await chat.run()
     finally:

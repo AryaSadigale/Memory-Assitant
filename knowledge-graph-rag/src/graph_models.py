@@ -1,5 +1,5 @@
 # FILE: src/graph_models.py
-# CHANGES: Added DocumentNode while preserving existing graph and retrieval dataclasses.
+# CHANGES: Added ProfileNode and user-scoped DocumentNode while preserving existing graph and retrieval dataclasses.
 
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -38,6 +38,19 @@ class TopicNode:
 
 
 @dataclass
+class ProfileNode:
+    """Represents a registered user profile in the knowledge graph."""
+
+    user_id: str
+    username: str
+    display_name: str
+    created_at: str
+    chunk_count: int = 0
+    document_count: int = 0
+    memory_count: int = 0
+
+
+@dataclass
 class DocumentNode:
     """Represents a top-level ingested document in the knowledge graph."""
 
@@ -48,6 +61,7 @@ class DocumentNode:
     abstract: str
     page_count: int
     chunk_count: int = 0
+    user_id: str = "default"
     ingested_at: Optional[datetime] = None
 
 

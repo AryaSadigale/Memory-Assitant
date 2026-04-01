@@ -1,5 +1,5 @@
 # FILE: src/retrieval/graph_traversal.py
-# PURPOSE: Expand seed chunk retrieval results through graph relationships.
+# CHANGES: Added user-scoped graph expansion so neighbor chunks cannot leak across profiles.
 
 from typing import List
 
@@ -14,7 +14,7 @@ class GraphTraversal:
         """Initialize the graph traversal service."""
         self.client = client
 
-    async def expand_from_chunks(self, chunk_ids: List[str], depth: int = 1) -> List[RetrievalHit]:
+    async def expand_from_chunks(self, chunk_ids: List[str], depth: int = 1, user_id: str = "default") -> List[RetrievalHit]:
         """Find neighboring chunks connected through shared entities."""
         if not chunk_ids:
             return []
@@ -22,6 +22,7 @@ class GraphTraversal:
         MATCH (seed:Chunk)-[:MENTIONS]->(e:Entity)<-[:MENTIONS]-(neighbor:Chunk)
         WHERE seed.chunk_id IN $chunk_ids
           AND NOT neighbor.chunk_id IN $chunk_ids
+          AND (neighbor.user_id = $user_id OR neighbor.user_id IS NULL)
         RETURN DISTINCT neighbor.chunk_id AS id,
                neighbor.content AS content,
                neighbor.source_file AS source_file,
@@ -30,7 +31,7 @@ class GraphTraversal:
         ORDER BY shared_entities DESC
         LIMIT 5
         """
-        rows = await self.client.run_query(query, {"chunk_ids": chunk_ids, "depth": depth})
+        rows = await self.client.run_query(query, {"chunk_ids": chunk_ids, "depth": depth, "user_id": user_id})
         return [
             RetrievalHit(
                 id=row["id"],
