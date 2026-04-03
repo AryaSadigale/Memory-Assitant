@@ -204,7 +204,47 @@ docker compose run --rm app python ingest.py /app/data
 /admin ingest <username> <path>
 /quit
 ```
+macOS Setup
+Prerequisites
 
+Make sure you have the following installed:
+
+Docker Desktop for Mac → https://www.docker.com/products/docker-desktop
+Python 3.10+ (optional for local runs) → https://www.python.org/downloads/
+Homebrew (recommended)
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+Step 1: Navigate to Project
+cd knowledge-graph-rag
+Step 2: Build Docker Containers
+docker compose build app
+Step 3: Start Neo4j Database
+docker compose up -d neo4j
+
+👉 Open Neo4j Browser:
+http://localhost:7474
+
+Default credentials:
+
+Username: neo4j
+Password: password
+Step 4: Set Groq API Key
+export GROQ_API_KEY="your_actual_key"
+
+To make it permanent (optional):
+
+echo 'export GROQ_API_KEY="your_actual_key"' >> ~/.zshrc
+source ~/.zshrc
+Step 5: Run Chat Application
+docker compose run --rm app python main.py
+Step 6: Run Document Ingestion
+docker compose run --rm app python ingest.py /app/data
+🛠️ Notes for macOS Users
+If Docker commands fail, ensure Docker Desktop is running
+Use docker compose (not docker-compose) for newer versions
+On Apple Silicon (M1/M2/M3), Docker will automatically handle architecture
+If ports are busy (7474 / 7687), stop conflicting apps
+⚡ Optional: Stop Services
+docker compose down
 ## Example Questions
 
 - `Tell me about knowledge graphs`
