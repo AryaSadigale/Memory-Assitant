@@ -1,5 +1,5 @@
 # FILE: src/memory/profile_manager.py
-# CHANGES: Added @-prefix tolerant username login while preserving interactive profile selection.
+# CHANGES: Added username entry support at the profile menu while preserving @-tolerant login flow.
 
 import json
 import os
@@ -238,7 +238,38 @@ class ProfileManager:
                 return await self._login_existing_user()
             if choice == "3":
                 return await self._create_new_profile()
-            print("  Invalid choice - continuing as last user.")
+            attempted_username = choice.lstrip("@").lower().strip()
+            if len(attempted_username) >= 3 and attempted_username.replace("_", "").replace("-", "").isalnum():
+                try:
+                    result = await self.client.run_query(
+                        "MATCH (p:Profile {username: $username}) "
+                        "RETURN p.user_id AS user_id, "
+                        "       p.username AS username, "
+                        "       p.display_name AS display_name, "
+                        "       p.created_at AS created_at",
+                        {"username": attempted_username},
+                    )
+                    if result:
+                        row = result[0]
+                        profile = UserProfile(
+                            user_id=row["user_id"],
+                            username=row["username"],
+                            display_name=row["display_name"],
+                            created_at=row["created_at"],
+                        )
+                        self._save_local_profile(profile)
+                        print(f"\n[Welcome back, {profile.display_name}!]")
+                        return profile
+                    print(
+                        f"  Username '{attempted_username}' not found. "
+                        "Continuing as last user."
+                    )
+                except Exception as exc:
+                    logger.warning("Username lookup failed: {}", exc)
+
+            neo4j_profile = await self._load_neo4j_profile(local.user_id)
+            if not neo4j_profile:
+                await self._create_neo4j_profile(local)
             print(f"\n[Welcome back, {local.display_name}!]")
             return local
 

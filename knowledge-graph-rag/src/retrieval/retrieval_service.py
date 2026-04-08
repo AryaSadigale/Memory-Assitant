@@ -1,5 +1,5 @@
 # FILE: src/retrieval/retrieval_service.py
-# CHANGES: Threaded user_id through chunk retrieval, filename lookup, and query expansion to enforce profile isolation.
+# CHANGES: Added self-query memory supplementation and low-relevance filtering while preserving user-scoped retrieval.
 
 import asyncio
 from typing import List, Optional
@@ -40,6 +40,48 @@ class RetrievalService:
         self.settings = settings
         self.llm_client = llm_client
         self.chunk_repo = chunk_repo
+
+    def _is_generic_self_query(self, query: str) -> bool:
+        """Return True if the query is a broad self-query needing all memories."""
+        generic_patterns = {
+            "myself",
+            "about me",
+            "who am i",
+            "what am i",
+            "tell me about me",
+            "what do you know",
+            "my profile",
+            "what have i told",
+            "what do i",
+        }
+        q_lower = query.lower()
+        return any(pattern in q_lower for pattern in generic_patterns)
+
+    async def _get_all_user_memories(
+        self, user_id: str, limit: int = 20
+    ) -> List[RetrievalHit]:
+        """Load recent memories directly from repository for broad self-queries."""
+        if self.chunk_repo is None or getattr(self.chunk_repo, "client", None) is None:
+            return []
+        try:
+            results = await self.chunk_repo.client.run_query(
+                "MATCH (m:Memory {user_id: $user_id}) "
+                "RETURN m.memory_id AS id, m.content AS content "
+                "ORDER BY m.created_at DESC LIMIT $limit",
+                {"user_id": user_id, "limit": limit},
+            )
+            return [
+                RetrievalHit(
+                    id=row["id"],
+                    content=row["content"],
+                    score=0.5,
+                    source_type="memory",
+                )
+                for row in results
+            ]
+        except Exception as exc:
+            logger.debug("Direct memory load failed: {}", exc)
+            return []
 
     async def retrieve_knowledge(self, query: str, top_k: int = 5, user_id: str = "default") -> List[RetrievalHit]:
         """Retrieve chunk-only knowledge results for a query."""
@@ -88,7 +130,16 @@ class RetrievalService:
             normalized_bm25 = hit.bm25_score / max_bm25 if hit.bm25_score else 0.0
             hit.score = (0.6 * normalized_vector) + (0.4 * normalized_bm25)
 
-        final_hits = sorted(combined.values(), key=lambda item: item.score, reverse=True)[: max(10, top_k)]
+        final_hits = sorted(combined.values(), key=lambda item: item.score, reverse=True)
+        min_vector_score = 0.30
+        high_quality = [
+            hit for hit in final_hits
+            if hit.vector_score >= min_vector_score or hit.vector_score == 0.0
+        ]
+        if len(high_quality) >= 3:
+            final_hits = high_quality[: max(10, top_k)]
+        else:
+            final_hits = final_hits[: max(10, top_k)]
         logger.debug("Knowledge retrieval returned {} chunks for query '{}'", len(final_hits), query)
         for index, hit in enumerate(final_hits, start=1):
             logger.debug(
@@ -107,7 +158,20 @@ class RetrievalService:
             self.vector_search.search_memories(embedding, user_id, top_k=self.settings.vector_top_k),
             self.bm25_search.search_memories(query, user_id, top_k=self.settings.bm25_top_k),
         )
-        return self.hybrid_ranker.rank(vector_hits, bm25_hits, [], top_k)
+        ranked = self.hybrid_ranker.rank(vector_hits, bm25_hits, [], top_k)
+
+        if self._is_generic_self_query(query) and self.chunk_repo is not None:
+            try:
+                recent = await self._get_all_user_memories(user_id, limit=20)
+                existing_ids = {hit.id for hit in ranked}
+                for hit in recent:
+                    if hit.id not in existing_ids:
+                        ranked.append(hit)
+                        existing_ids.add(hit.id)
+            except Exception as exc:
+                logger.debug("Recent memory supplement failed: {}", exc)
+
+        return ranked
 
     async def retrieve_by_filename(self, filename: str, user_id: str = "default", top_k: int = 5) -> List[RetrievalHit]:
         """

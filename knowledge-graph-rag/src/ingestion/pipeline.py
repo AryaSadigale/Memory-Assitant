@@ -1,5 +1,5 @@
 # FILE: src/ingestion/pipeline.py
-# CHANGES: Added user_id stamping to chunks and documents while preserving the existing ingestion workflow and index warmup.
+# CHANGES: Raised entity frequency threshold and filtered short/noisy canonical entities before graph upsert.
 
 import os
 import re
@@ -184,10 +184,21 @@ class IngestionPipeline:
             for entity in entities:
                 entity_counter[entity.entity_id] += 1
                 canonical_entities.setdefault(entity.entity_id, entity)
+        canonical_entities = {
+            entity_id: entity
+            for entity_id, entity in canonical_entities.items()
+            if len(entity.name.strip()) >= 3
+            and not entity.name.strip().replace("-", "").replace(" ", "").isdigit()
+        }
+        entity_counter = Counter({
+            entity_id: count
+            for entity_id, count in entity_counter.items()
+            if entity_id in canonical_entities
+        })
         frequent_entities = {
             entity_id
             for entity_id, count in entity_counter.items()
-            if count >= 5
+            if count >= 8
         }
         entities_to_upsert = []
         for entity_id in frequent_entities:

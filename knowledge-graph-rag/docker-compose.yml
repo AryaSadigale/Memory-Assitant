@@ -1,3 +1,5 @@
+# FILE: docker-compose.yml
+# CHANGES: Added a persistent named model cache volume so embeddings are not re-downloaded on each container start.
 services:
   neo4j:
     image: neo4j:5.20.0
@@ -38,9 +40,12 @@ services:
       - ./data:/app/data
       - ./session_data:/app/session_data
       - ./model_cache:/app/model_cache
+      - model_cache:/root/.cache/huggingface
+      - model_cache:/root/.cache/torch
     stdin_open: true
     tty: true
 
 volumes:
   neo4j_data:
   neo4j_logs:
+  model_cache:

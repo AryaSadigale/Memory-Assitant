@@ -1,5 +1,5 @@
 # FILE: src/config.py
-# PURPOSE: Centralize runtime configuration loaded from environment variables.
+# CHANGES: Reduced default chunk size and overlap for more precise document retrieval.
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -22,8 +22,9 @@ class Settings(BaseSettings):
     groq_model: str = Field(default="llama-3.3-70b-versatile", alias="GROQ_MODEL")
     embedding_model: str = Field(default="all-MiniLM-L6-v2", alias="EMBEDDING_MODEL")
     embedding_device: str = Field(default="cuda", alias="EMBEDDING_DEVICE")
-    chunk_size: int = Field(default=512, alias="CHUNK_SIZE")
-    chunk_overlap: int = Field(default=64, alias="CHUNK_OVERLAP")
+    embedding_cache_dir: str = Field(default="/root/.cache/huggingface", alias="EMBEDDING_CACHE_DIR")
+    chunk_size: int = Field(default=300, alias="CHUNK_SIZE")
+    chunk_overlap: int = Field(default=50, alias="CHUNK_OVERLAP")
     ingestion_batch_size: int = Field(default=64, alias="INGESTION_BATCH_SIZE")
     vector_top_k: int = Field(default=10, alias="VECTOR_TOP_K")
     bm25_top_k: int = Field(default=10, alias="BM25_TOP_K")

@@ -1,5 +1,5 @@
 # FILE: src/llm/llm_client.py
-# PURPOSE: Wrap the Groq chat completion API behind a small async client.
+# CHANGES: Added fail-fast GROQ key validation and raised the default completion token budget for long answers.
 
 from groq import AsyncGroq
 
@@ -9,14 +9,20 @@ class LLMClient:
 
     def __init__(self, api_key: str, model: str) -> None:
         """Initialize the Groq async client."""
-        self.client = AsyncGroq(api_key=api_key)
+        normalized_key = (api_key or "").strip()
+        if not normalized_key:
+            raise ValueError(
+                "GROQ_API_KEY is missing or blank. Set it in your shell or in a "
+                ".env file before running 'docker compose run --rm app python main.py'."
+            )
+        self.client = AsyncGroq(api_key=normalized_key)
         self.model = model
 
     async def complete(
         self,
         system_prompt: str,
         user_prompt: str,
-        max_tokens: int = 512,
+        max_tokens: int = 1500,
         temperature: float = 0.2,
     ) -> str:
         """Generate a chat completion from system and user prompts."""

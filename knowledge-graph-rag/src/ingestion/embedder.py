@@ -1,6 +1,7 @@
 # FILE: src/ingestion/embedder.py
-# PURPOSE: Lazily load and serve sentence-transformer embeddings for text batches.
+# CHANGES: Configured SentenceTransformer to use a persistent cache folder for model downloads.
 
+import os
 import time
 from typing import List, Optional
 
@@ -27,7 +28,15 @@ class Embedder:
         if self.device == "cuda" and not torch.cuda.is_available():
             resolved_device = "cpu"
         started = time.perf_counter()
-        self.model = SentenceTransformer(self.model_name, device=resolved_device)
+        cache_dir = os.environ.get(
+            "TRANSFORMERS_CACHE",
+            "/root/.cache/huggingface"
+        )
+        self.model = SentenceTransformer(
+            self.model_name,
+            device=resolved_device,
+            cache_folder=cache_dir
+        )
         logger.info(
             "Loaded embedding model {} on {} in {:.2f}s",
             self.model_name,

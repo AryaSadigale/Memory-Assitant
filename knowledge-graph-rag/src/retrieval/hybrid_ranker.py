@@ -1,5 +1,5 @@
 # FILE: src/retrieval/hybrid_ranker.py
-# CHANGES: Added source diversity enforcement on top of reciprocal rank fusion results.
+# CHANGES: Raised the vector relevance threshold and added a BM25 strong-source boost before diversity filtering.
 
 from typing import Dict, List
 
@@ -52,6 +52,15 @@ class HybridRanker:
         merge_hits(bm25_hits, "bm25")
         merge_hits(graph_hits, "graph")
 
+        bm25_strong_sources = set()
+        for hit in bm25_hits:
+            if hit.source_file and (hit.bm25_score or hit.score) > 3.0:
+                bm25_strong_sources.add(hit.source_file)
+
+        for hit in aggregated.values():
+            if hit.source_file in bm25_strong_sources:
+                hit.score *= 1.3
+
         sorted_hits = sorted(aggregated.values(), key=lambda hit: hit.score, reverse=True)
 
         seen_sources: dict = {}
@@ -65,4 +74,11 @@ class HybridRanker:
             if len(diverse_results) >= top_k:
                 break
 
+        min_vector_score = 0.50
+        high_quality = [
+            hit for hit in diverse_results
+            if hit.vector_score >= min_vector_score or hit.vector_score == 0.0
+        ]
+        if len(high_quality) >= 3:
+            return high_quality[:top_k]
         return diverse_results

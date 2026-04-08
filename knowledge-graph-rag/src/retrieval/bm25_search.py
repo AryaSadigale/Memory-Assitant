@@ -1,5 +1,5 @@
 # FILE: src/retrieval/bm25_search.py
-# CHANGES: Added user-scoped BM25 retrieval while preserving diagnostics and shared-pool visibility.
+# CHANGES: Added an aviation-generic term filter for multi-word chunk BM25 queries.
 
 import re
 from typing import List
@@ -41,6 +41,23 @@ class BM25Search:
             return []
 
         escaped = self._escape_query(query)
+        aviation_generic = {
+            "aircraft", "runway", "pilot", "airport", "flight",
+            "landing", "takeoff", "aviation", "air", "fly", "flying",
+        }
+        query_words = escaped.lower().split()
+        if len(query_words) > 3:
+            filtered_words = [
+                word for word in query_words
+                if word not in aviation_generic
+            ]
+            if len(filtered_words) >= 2:
+                logger.debug(
+                    "BM25 aviation filter applied: '{}' -> '{}'",
+                    " ".join(query_words),
+                    " ".join(filtered_words),
+                )
+                escaped = " ".join(filtered_words)
         logger.debug("BM25 search query: '{}'", escaped)
 
         try:
@@ -86,18 +103,38 @@ class BM25Search:
             logger.warning("Memory BM25 search called with empty query")
             return []
 
+        self_query_signals = {"myself", "about me", "who am i", "tell me"}
+        q_lower = query.lower().strip()
+        if any(signal in q_lower for signal in self_query_signals):
+            if len(q_lower.split()) <= 4:
+                logger.debug(
+                    "Memory BM25: pure self-query '{}' - skipping BM25, vector search will handle it",
+                    query,
+                )
+                return []
+
         escaped = self._escape_query(query)
         logger.debug("Memory BM25 search query: '{}'", escaped)
 
         stopwords = {
-            "the", "and", "for", "with", "that", "this", "from",
-            "tell", "about", "what", "know", "myself", "your", "you",
-            "are", "how", "who", "why", "when", "where", "give", "show",
-            "can", "did", "have", "been", "into", "more", "also",
+            "the", "and", "for", "with", "that", "this",
+            "are", "was", "were", "been", "have", "has",
+            "had", "will", "would", "could", "should",
+            "shall", "may", "might", "must",
+            "tell", "about", "what", "know",
+            "myself", "yourself", "himself", "herself",
+            "themselves", "itself",
+            "which", "where", "when", "how", "why", "who",
+            "give", "show", "your", "their", "our", "its",
+            "just", "also", "more", "most", "some", "such",
+            "into", "onto", "over", "under", "very",
+            "much", "many", "only", "even", "still",
+            "there", "here", "then", "than",
+            "okay", "yes", "yep", "nope", "yeah", "hmm",
         }
         words = [
             word
-            for word in re.findall(r"\b[a-zA-Z]{3,}\b", query.lower())
+            for word in re.findall(r"\b[a-zA-Z]{2,}\b", query.lower())
             if word not in stopwords
         ]
 

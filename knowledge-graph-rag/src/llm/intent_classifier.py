@@ -1,5 +1,5 @@
 # FILE: src/llm/intent_classifier.py
-# CHANGES: Tightened classifier guidance so topic queries stay in knowledge_query and only explicit file references use document_lookup.
+# CHANGES: Replaced the classifier prompt so introductions and short replies route to the correct intents.
 
 from src.llm.llm_client import LLMClient
 
@@ -15,45 +15,45 @@ VALID_INTENTS = {
 class IntentClassifier:
     """LLM-backed intent classifier for routing chat requests."""
 
-    SYSTEM_PROMPT = """Classify the user message into exactly one intent.
+    SYSTEM_PROMPT = """You are an intent classifier for a personal
+memory assistant. Classify the message into exactly one intent.
 
-- knowledge_query: user wants factual information about a topic, concept,
-  technology, process, or field. This includes "tell me about X" where X
-  is a topic, not a specific file.
+memory_share - user is telling you personal facts about themselves:
+  name, job, location, preferences, relationships, experiences.
+  Use this even if the message is casual or mixed with other content.
+  Examples: "Hello my name is Arya I work in aviation"
+            "I am the CEO of a fintech company"
+            "I live in Boston and work at HEBBRIX"
+            "I love flying A380s since 2015"
 
-- document_lookup: user is referencing a SPECIFIC document by filename,
-  arxiv ID, or asking to list available documents. Only use this when
-  the message contains a filename (ends in .pdf, .txt), an arxiv-style ID
-  like 2403.04782, or explicit phrases like "what papers do you have",
-  "list documents", "list files", "what files", "show documents".
+self_query - user is asking what YOU know about THEM personally:
+  Examples: "Tell me about myself"
+            "What is my name?"
+            "Where do I work?"
+            "Which airlines did I fly?"
+            "What are my preferences?"
 
-- memory_share: user is sharing personal facts about themselves.
+knowledge_query - user wants facts about the world, a topic, or field:
+  Examples: "What is a taxiway?"
+            "Tell me about fintech"
+            "Explain neural networks"
+            "Why is federated learning useful?"
 
-- self_query: user is asking what you know about them personally.
+document_lookup - user asks about a specific file or paper by name:
+  Examples: "Tell me about 3445.pdf"
+            "What papers do you have?"
+            "List documents"
 
-- chitchat: casual talk, greetings, short replies, corrections.
+chitchat - casual talk, short replies, greetings, acknowledgements:
+  Examples: "Cool" "okay" "Thanks" "Got it" "Hi" "Yes" "Nope"
 
-CRITICAL RULE: "Tell me about [topic]" is knowledge_query unless the
-topic is a specific filename or document ID. Topics like "airports",
-"machine learning", "chapter 10", "towered airport", "fintech" are
-knowledge_query, NOT document_lookup.
-
-Examples of knowledge_query:
-  "Tell me about towered airports"
-  "Explain aeronautical charts"
-  "What is federated learning"
-  "Tell me about chapter 10"
-  "What does the book say about payments"
-
-Examples of document_lookup:
-  "Tell me about 2403.04782v1.pdf"
-  "What is in 3445.pdf"
-  "Tell me about the osdi paper"
-  "What papers do you have"
-  "List my documents"
-  "Tell me about chapter 10 from 3445.pdf"
-
-Reply with ONLY the intent label. No explanation. No punctuation."""
+CRITICAL RULES:
+1. If message contains "my name is", "I work at", "I live in",
+   "I am a", "I love", "I prefer", it is ALWAYS memory_share.
+2. Words like "Cool", "okay", "sure", "thanks", "hi", "hello"
+   alone or with only 1-2 other words = ALWAYS chitchat.
+3. Never return knowledge_query for personal introductions.
+4. Reply with ONLY the intent label. Nothing else."""
 
     def __init__(self, llm_client: LLMClient) -> None:
         """Initialize the classifier with an LLM client."""
@@ -61,13 +61,18 @@ Reply with ONLY the intent label. No explanation. No punctuation."""
 
     async def classify(self, message: str) -> str:
         """Classify a user message into one of the supported intents."""
-        response = await self.llm_client.complete(
-            self.SYSTEM_PROMPT,
-            message,
-            max_tokens=10,
+        response = await self.llm_client.client.chat.completions.create(
+            model=self.llm_client.model,
             temperature=0.0,
+            max_tokens=10,
+            messages=[
+                {"role": "system", "content": self.SYSTEM_PROMPT},
+                {"role": "user", "content": message},
+            ],
         )
-        normalized = response.strip().lower()
+        content = (response.choices[0].message.content or "").strip().lower()
+        first_line = content.splitlines()[0] if content else ""
+        normalized = first_line.strip(" .")
         if normalized not in VALID_INTENTS:
             return "knowledge_query"
         return normalized

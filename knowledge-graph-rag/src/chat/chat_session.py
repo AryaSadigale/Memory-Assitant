@@ -1,5 +1,5 @@
 # FILE: src/chat/chat_session.py
-# CHANGES: Fixed filename extraction for spaced filenames and added document_lookup topic fallback retrieval.
+# CHANGES: Updated /debug to use retrieval settings and show final hybrid-ranked chunks.
 
 import asyncio
 import os
@@ -54,7 +54,30 @@ class ChatSession:
         self.username = username
         self.profile_repo = profile_repo
         self.profile_manager = profile_manager
-        self.simple_system = "You are a concise, helpful terminal chat assistant."
+        self.simple_system = (
+            "You are a friendly, concise chat assistant. "
+            "Reply in 1-2 natural sentences. "
+            "No markdown, no headers, no bullet points."
+        )
+
+    async def _complete_raw(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        max_tokens: int = 1500,
+        temperature: float = 0.2,
+    ) -> str:
+        """Call the model directly so response formatting follows the supplied prompt."""
+        response = await self.llm.client.chat.completions.create(
+            model=self.llm.model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        )
+        return (response.choices[0].message.content or "").strip()
 
     async def _read_input(self) -> str:
         """Read user input without blocking the event loop."""
@@ -172,15 +195,40 @@ class ChatSession:
         embedding = self.retrieval.embedder.embed_text(debug_query)
         print(f"[DEBUG] Embedding dim: {len(embedding)}")
 
-        v_hits = await self.retrieval.vector_search.search_chunks(embedding, top_k=5, user_id=self.user_id)
+        v_hits = await self.retrieval.vector_search.search_chunks(
+            embedding,
+            top_k=self.retrieval.settings.vector_top_k,
+            user_id=self.user_id,
+        )
         print(f"[DEBUG] Vector hits: {len(v_hits)}")
         for hit in v_hits[:3]:
             print(f"  score={hit.score:.3f} | {hit.source_file} | {hit.content[:60]}...")
 
-        b_hits = await self.retrieval.bm25_search.search_chunks(debug_query, top_k=5, user_id=self.user_id)
+        b_hits = await self.retrieval.bm25_search.search_chunks(
+            debug_query,
+            top_k=self.retrieval.settings.bm25_top_k,
+            user_id=self.user_id,
+        )
         print(f"[DEBUG] BM25 hits: {len(b_hits)}")
         for hit in b_hits[:3]:
             print(f"  score={hit.score:.3f} | {hit.source_file} | {hit.content[:60]}...")
+        graph_hits = await self.retrieval.graph_traversal.expand_from_chunks(
+            [hit.id for hit in v_hits[:3]],
+            user_id=self.user_id,
+        )
+        final_hits = self.retrieval.hybrid_ranker.rank(
+            v_hits,
+            b_hits,
+            graph_hits,
+            top_k=self.retrieval.settings.final_top_k,
+        )
+        print(f"[DEBUG] After ranking: {len(final_hits)} final chunks")
+        for hit in final_hits:
+            print(
+                f"  final_score={hit.score:.3f} | "
+                f"{hit.source_file} p{hit.page_number} | "
+                f"{hit.content[:60]}..."
+            )
         print()
 
     def _extract_filename_from_query(self, text: str) -> str:
@@ -379,6 +427,17 @@ class ChatSession:
                 if should_continue:
                     continue
 
+            stripped_input = user_input.strip()
+            if len(stripped_input.split()) <= 2 and "?" not in stripped_input:
+                response = await self._complete_raw(
+                    self.simple_system,
+                    stripped_input,
+                    max_tokens=60,
+                    temperature=0.7,
+                )
+                print(f"AI: {response}\n")
+                continue
+
             intent = await self.classifier.classify(user_input)
             print(f"  [{intent}]")
 
@@ -386,7 +445,7 @@ class ChatSession:
                 created = await self.memory_service.process_and_store(user_input, self.user_id)
                 if created and self.profile_manager is not None:
                     await self.profile_manager.update_stats(self.user_id, memory_delta=len(created))
-                response = await self.llm.complete(
+                response = await self._complete_raw(
                     "You are a concise assistant acknowledging that a memory was stored.",
                     "Acknowledge the memory briefly in one sentence.",
                     max_tokens=40,
@@ -397,10 +456,10 @@ class ChatSession:
                 packet = self.assembler.build_memory_context(user_input, hits)
                 if hits:
                     await self.memory_repo.touch_many([hit.id for hit in hits])
-                response = await self.llm.complete(
+                response = await self._complete_raw(
                     packet.system_prompt,
                     packet.user_prompt,
-                    max_tokens=120,
+                    max_tokens=600,
                     temperature=0.0,
                 )
             elif intent == "document_lookup":
@@ -449,13 +508,29 @@ class ChatSession:
                         response = "No documents available."
                 else:
                     packet = self.assembler.build_knowledge_context(user_input, hits)
-                    response = await self.llm.complete(packet.system_prompt, packet.user_prompt)
+                    response = await self._complete_raw(
+                        packet.system_prompt,
+                        packet.user_prompt,
+                        max_tokens=1500,
+                    )
             elif intent == "knowledge_query":
                 hits = await self.retrieval.retrieve_with_query_expansion(user_input, user_id=self.user_id)
                 packet = self.assembler.build_knowledge_context(user_input, hits)
-                response = await self.llm.complete(packet.system_prompt, packet.user_prompt)
-            else:
-                response = await self.llm.complete(self.simple_system, user_input, max_tokens=120, temperature=0.5)
+                response = await self._complete_raw(
+                    packet.system_prompt,
+                    packet.user_prompt,
+                    max_tokens=1500,
+                )
+            elif intent == "chitchat" or intent not in {
+                "memory_share", "self_query",
+                "knowledge_query", "document_lookup"
+            }:
+                response = await self._complete_raw(
+                    self.simple_system,
+                    user_input,
+                    max_tokens=80,
+                    temperature=0.7,
+                )
 
             logger.debug("LLM response length: {}", len(response))
             print(f"AI: {response}\n")
